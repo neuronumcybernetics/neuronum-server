@@ -21,7 +21,7 @@ source ~/neuronum-venv/bin/activate
 
 Install the Neuronum SDK:
 ```sh
-pip install neuronum==2025.12.0.dev7
+pip install neuronum==2025.12.0.dev9
 ```
 
 > **Note:** Always activate this virtual environment (`source ~/neuronum-venv/bin/activate`) before running any `neuronum` commands.
@@ -43,7 +43,7 @@ neuronum connect-cell
 **Start the Server**
 
 ```sh
-neuronum serve-agent
+neuronum start-server
 ```
 
 This command will:
@@ -63,7 +63,7 @@ tail -f neuronum-server/vllm_server.log
 **Stopping the Server**
 
 ```sh
-neuronum stop-agent
+neuronum stop-server
 ```
 
 **What the Server Does**
@@ -112,7 +112,7 @@ FTS5_STOPWORDS = {...}               # Words to exclude from knowledge search
 
 After modifying the configuration, restart the server for changes to take effect:
 ```sh
-neuronum stop-agent
-neuronum serve-agent
+neuronum stop-server
+neuronum start-server
 ```
 
