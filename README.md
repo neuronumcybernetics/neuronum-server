@@ -70,10 +70,9 @@ neuronum stop-server
 
 Once running, the server will:
 - Connect to the Neuronum network using your Cell credentials
-- Initialize a local SQLite database for conversation memory and knowledge storage
+- Initialize a local SQLite database for conversation memory and auto-indexes files in the `templates/` directory
 - Auto-discover and launch any MCP servers in the `tools/` directory
 - Process messages from clients via the Neuronum network
-- Execute scheduled tasks defined in the `tasks/` directory
 
 **Server Configuration**
 
