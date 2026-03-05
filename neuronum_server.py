@@ -9,9 +9,7 @@ from datetime import datetime
 from openai import OpenAI
 import aiosqlite
 from typing import List, Tuple
-import re
 from neuronum import Cell
-import hashlib
 import logging
 import subprocess
 import json
@@ -29,8 +27,6 @@ from config import (
     OLLAMA_MODEL_NAME,
     OLLAMA_API_BASE,
     CONVERSATION_HISTORY_LIMIT,
-    KNOWLEDGE_RETRIEVAL_LIMIT,
-    FTS5_STOPWORDS,
     TEMPLATES_DIR
 )
 
@@ -46,7 +42,7 @@ def detect_backend():
 API_BASE, MODEL_NAME, BACKEND = detect_backend()
 
 # Setup Jinja2 environment
-env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
+env = Environment(loader=FileSystemLoader(TEMPLATES_DIR), autoescape=True)
 
 # Logging Setup
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -56,36 +52,6 @@ logger.setLevel(logging.INFO)
 file_handler = logging.FileHandler(LOG_FILE, mode='a')
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
-
-# System Prompts
-
-RAG_PROMPT_TEMPLATE = textwrap.dedent("""
-    You are an assistant that can ONLY use the information provided below. You have NO other knowledge.
-
-    1. CONVERSATION HISTORY - The previous user/assistant messages are your memory of past discussions.
-       Use this to answer questions about what was discussed, recent activities, or follow-ups.
-
-    2. RELEVANT CONTEXT - Knowledge retrieved from the database, marked with "RELEVANT CONTEXT:".
-       This contains factual information. Trust it completely as the source of truth.
-
-    IMPORTANT RULES:
-    - ONLY answer using the CONVERSATION HISTORY and RELEVANT CONTEXT provided. Do NOT use any outside knowledge.
-    - If the user asks about past conversations but there are NO previous messages, say "I don't have any record of previous conversations."
-    - NEVER make up or invent information. Only use what is explicitly provided.
-    - If the provided context does not contain the answer, say you don't have that information.
-    - Be concise and direct.
-""")
-
-FILE_RAG_PROMPT_TEMPLATE = textwrap.dedent("""
-    Answer the following prompt with the given context:
-
-    **Prompt:**
-    {prompt}
-
-    **CONTEXT:**
-    {context}
-    ---
-""")
 
 # Database Functions
 
@@ -97,7 +63,7 @@ async def enable_wal(db_path=DB_PATH):
         logging.info("WAL mode enabled.")
 
 async def init_db(db_path=DB_PATH):
-    """Initialize memory and FTS5 sitemap tables"""
+    """Initialize database tables"""
     async with aiosqlite.connect(db_path) as db:
         await db.execute('''
             CREATE TABLE IF NOT EXISTS memory (
@@ -129,23 +95,6 @@ async def init_db(db_path=DB_PATH):
             )
         ''')
         
-        await db.execute('''
-            CREATE VIRTUAL TABLE IF NOT EXISTS sitemap USING fts5(
-                sitemap_id,
-                file_name,
-                file_content,
-                tokenize='porter unicode61'
-            )
-        ''')
-
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
         await db.commit()
         logging.info("Database initialized.")
 
@@ -299,131 +248,6 @@ def validate_tool_parameters(parameters: dict, input_schema: dict) -> tuple[bool
     return True, ""
 
 
-async def add_sitemap_entry(file_name: str, file_content: str, db_path=DB_PATH):
-    """Add sitemap entry to FTS5 table with generated ID"""
-    combined = f"{file_name}:{file_content}"
-    sitemap_id = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "INSERT INTO sitemap (sitemap_id, file_name, file_content) VALUES (?, ?, ?)",
-            (sitemap_id, file_name, file_content)
-        )
-        await db.commit()
-
-async def delete_sitemap_entry(sitemap_id: str, db_path=DB_PATH):
-    """Delete sitemap entry from FTS5 table using sitemap_id"""
-    if not sitemap_id:
-        logging.warning("Attempted to delete sitemap entry with a missing sitemap_id.")
-        return False
-
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "DELETE FROM sitemap WHERE sitemap_id = ?",
-            (sitemap_id,)
-        )
-        await db.commit()
-
-        deleted_count = db.total_changes
-
-        if deleted_count > 0:
-            logging.info(f"Sitemap entry with ID '{sitemap_id}' deleted successfully.")
-            return True
-        else:
-            logging.warning(f"Sitemap entry with ID '{sitemap_id}' not found or not deleted.")
-            return False
-
-async def update_sitemap_entry(sitemap_id: str, new_content: str, db_path=DB_PATH) -> bool:
-    """Update file_content of existing FTS5 sitemap entry"""
-    if not sitemap_id or not new_content:
-        logging.warning("Attempted to update sitemap with a missing sitemap_id or new_content.")
-        return False
-
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "UPDATE sitemap SET file_content = ? WHERE sitemap_id = ?",
-            (new_content, sitemap_id)
-        )
-        await db.commit()
-
-        updated_count = db.total_changes
-
-        if updated_count > 0:
-            logging.info(f"Sitemap entry with ID '{sitemap_id}' updated successfully.")
-            return True
-        else:
-            logging.warning(f"Sitemap entry with ID '{sitemap_id}' not found or not updated.")
-            return False
-
-async def retrieve_sitemap(user_query: str, db_path=DB_PATH, include_file_name=False):
-    """Retrieve relevant sitemap entries using FTS5 keyword search
-
-    Args:
-        user_query: The search query
-        db_path: Database path
-        include_file_name: If True, returns list of (file_name, file_content) tuples
-
-    Returns:
-        If include_file_name=False: str with joined file_content
-        If include_file_name=True: list of (file_name, file_content) tuples
-    """
-    tokens = re.findall(r"\b\w+\b", user_query.lower())
-
-    ENHANCED_STOPWORDS = FTS5_STOPWORDS | {"or", "and", "not", "near"}
-    keywords = [t for t in tokens if t not in ENHANCED_STOPWORDS]
-
-    if not keywords:
-        if include_file_name:
-            return []
-        return "No matching templates found in the sitemap."
-
-    keywords = keywords[:10]
-    quoted_keywords = [f'"{keyword}"' for keyword in keywords]
-    search_expr = " OR ".join(quoted_keywords)
-
-    async with aiosqlite.connect(db_path) as db:
-        try:
-            query = """
-                SELECT file_name, file_content, bm25(sitemap) as score
-                FROM sitemap
-                WHERE sitemap MATCH ?
-                ORDER BY score
-                LIMIT ?
-            """
-            async with db.execute(query, (search_expr, KNOWLEDGE_RETRIEVAL_LIMIT)) as cursor:
-                rows = await cursor.fetchall()
-
-                if rows:
-                    if include_file_name:
-                        return [(row[0], row[1]) for row in rows]
-                    content_chunks = [row[1] for row in rows]
-                    return "\n---\n".join(content_chunks)
-                else:
-                    if include_file_name:
-                        return []
-                    return "No matching templates found in the sitemap."
-        except Exception as e:
-            logging.warning(f"Sitemap retrieval error: {str(e)[:100]}")
-            if include_file_name:
-                return []
-            return "Sitemap retrieval temporarily unavailable."
-
-async def get_setting(key: str, db_path=DB_PATH) -> str:
-    """Get a setting value from the settings table"""
-    async with aiosqlite.connect(db_path) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
-async def set_setting(key: str, value: str, db_path=DB_PATH):
-    """Set a setting value (insert or update)"""
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute(
-            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?, timestamp = CURRENT_TIMESTAMP",
-            (key, value, value)
-        )
-        await db.commit()
-
 # OpenAI Client Configuration (works with both vLLM and Ollama)
 try:
     logging.info(f"Backend: {BACKEND} | Connecting to {API_BASE} | Model: {MODEL_NAME}")
@@ -471,24 +295,6 @@ def create_chat_completion(messages, max_tokens=MODEL_MAX_TOKENS, temperature=MO
         else:
             logging.error("Make sure vLLM is running at http://127.0.0.1:8000")
         raise
-
-async def fetch_all_sitemap(db_path=DB_PATH) -> List[dict]:
-    """Fetch all sitemap entries from FTS5 table"""
-    async with aiosqlite.connect(db_path) as db:
-        query = "SELECT sitemap_id, file_name, file_content FROM sitemap ORDER BY sitemap_id ASC"
-
-        async with db.execute(query) as cursor:
-            rows = await cursor.fetchall()
-
-            sitemap_list = []
-            for row in rows:
-                sitemap_list.append({
-                    "sitemap_id": row[0],
-                    "file_name": row[1],
-                    "file_content": row[2]
-                })
-
-            return sitemap_list
 
 async def fetch_all_actions(operator: str = None, db_path=DB_PATH) -> List[dict]:
     """Fetch action entries from actions table (audit log), optionally filtered by operator"""
@@ -540,9 +346,6 @@ async def erase_data(db_path=DB_PATH):
             await db.execute("DELETE FROM memory")
             logging.info("All conversation history deleted from memory table.")
 
-            await db.execute("DELETE FROM sitemap")
-            logging.info("All sitemap entries deleted from sitemap table.")
-
             await db.commit()
 
         with open(LOG_FILE, 'w') as f:
@@ -555,83 +358,6 @@ async def erase_data(db_path=DB_PATH):
     except Exception as e:
         logging.error(f"Error during data erasure: {e}")
         return False
-
-
-async def get_model_answer(user_id: str, user_query: str, file: bool = False, file_content: str = "") -> str:
-    """Core RAG function for generating answers with context"""
-    loop = asyncio.get_running_loop()
-
-    if file:
-        augmented_system_prompt = FILE_RAG_PROMPT_TEMPLATE.format(prompt=user_query, context=file_content)
-
-        messages = [
-            {"role": "user", "content": augmented_system_prompt},
-        ]
-
-        logging.info(f"[Messages for Agent]: {messages}")
-
-        def generate_text():
-            response = create_chat_completion(
-                messages=messages,
-                max_tokens=MODEL_MAX_TOKENS,
-                temperature=MODEL_TEMPERATURE
-            )
-            content = response['choices'][0]['message']['content']
-            return content.strip()
-
-        answer = await loop.run_in_executor(None, generate_text)
-
-        full_prompt = user_query + file_content
-
-        if answer:
-            await store_message(user_id, "user", full_prompt)
-            await store_message(user_id, "assistant", answer)
-        else:
-            logging.warning("Warning: Model returned empty response, not storing in conversation history")
-
-        return answer
-    else:
-        context = await retrieve_sitemap(user_query)
-        augmented_system_prompt = RAG_PROMPT_TEMPLATE
-        history = await fetch_latest_messages(user_id, limit=10)
-
-        messages = [
-            {"role": "system", "content": augmented_system_prompt},
-        ]
-
-        # Add conversation history (user and assistant messages only)
-        for role, message in history:
-            if role in ["user", "assistant"]:
-                messages.append({"role": role, "content": message})
-
-        # Add context as a separate system message if found
-        if context != "No matching templates found in the sitemap.":
-            messages.append({"role": "system", "content": f"RELEVANT CONTEXT:\n{context}"})
-
-        # Add the user's actual query
-        messages.append({"role": "user", "content": user_query})
-
-        logging.info(f"[Messages for Agent]: {messages}")
-
-        def generate_text():
-            response = create_chat_completion(
-                messages=messages,
-                max_tokens=MODEL_MAX_TOKENS,
-                temperature=MODEL_TEMPERATURE
-            )
-            logging.info(f"[Raw LLM Response]: {response}")
-            content = response['choices'][0]['message']['content']
-            return content.strip()
-
-        answer = await loop.run_in_executor(None, generate_text)
-
-        if answer:
-            await store_message(user_id, "user", user_query)
-            await store_message(user_id, "assistant", answer)
-        else:
-            logging.warning("Warning: Model returned empty response, not storing in conversation history")
-
-        return answer
 
 
 async def convert_tool_result_to_natural_language(
@@ -652,7 +378,7 @@ async def convert_tool_result_to_natural_language(
                 tool_output = str(tool_result)
 
             # Create prompt for LLM to interpret the response
-            prompt = f"""Convert this tool execution result into a direct, factual statement.
+            prompt = f"""Summarize this tool result in 2-3 short sentences. Focus on the most important highlights only.
 
 Tool: {tool_name}
 Task: {subject if subject else 'Tool execution'}
@@ -661,20 +387,19 @@ Tool Response:
 {tool_output}
 
 Guidelines:
-- Write in third person or passive voice - NO "you", "I", "we"
-- State facts directly and concisely
-- Include ALL specific details from the result: names, dates, times, locations, IDs, amounts
-- When the result contains a list of items, include the key details of EACH item - do not just state the count
-- No congratulations, praise, or emotional language
-- No phrases like "successfully", "great job", "went smoothly"
-- Just state what happened and the result
+- Maximum 2-3 sentences, be very brief
+- Mention only the top 2-3 most important numbers or items
+- Do NOT list every item — just summarize the key takeaway
+- Start directly with the answer — do NOT start with "Here is", "The result shows", "Summary:", or any preamble
+- Write as if you are the AI agent speaking to the user directly
+- No praise, no emotional language
 
 Example good responses:
-- "Account balance is €1000."
-- "€200 sent to Steven. New balance: €800."
-- "2 meetings found: (1) Team Standup on 2027-01-30, 09:00-09:30 in Room 5. (2) Client Call on 2027-01-30, 14:00-15:00 in Room 12."
+- "Total value is €1.1M across 8 items. Success rate at 75% with €411K completed."
+- "3 open tickets, 1 critical. SLA breached on 2 items."
+- "Found 5 results matching the query. Top match: Product Overview (last updated Feb 2026)."
 
-Factual statement:"""
+Answer:"""
 
             messages = [{"role": "user", "content": prompt}]
 
@@ -746,67 +471,6 @@ Summary:"""
 
 
 # Infrastructure Setup
-
-async def index_templates(db_path=DB_PATH):
-    """Auto-index HTML templates into sitemap table on startup.
-
-    Scans the templates folder, strips HTML tags to extract text content,
-    and creates sitemap entries (file_name=filename, file_content=text).
-    Skips files already in the sitemap table and removes entries
-    for templates that no longer exist.
-    """
-    templates_dir = TEMPLATES_DIR
-    if not os.path.isdir(templates_dir):
-        logging.warning(f"Templates directory '{templates_dir}' not found. Skipping auto-index.")
-        return
-
-    # Get all .html files in templates folder
-    html_files = {f for f in os.listdir(templates_dir) if f.endswith(".html")}
-    logging.info(f"Found {len(html_files)} HTML templates to index")
-
-    async with aiosqlite.connect(db_path) as db:
-        # Get existing sitemap entries
-        async with db.execute("SELECT sitemap_id, file_name FROM sitemap") as cursor:
-            existing = await cursor.fetchall()
-
-        existing_files = {row[1]: row[0] for row in existing}  # file_name -> sitemap_id
-
-        # Remove entries for deleted templates
-        for file_name, sitemap_id in existing_files.items():
-            if file_name.endswith(".html") and file_name not in html_files:
-                await db.execute("DELETE FROM sitemap WHERE sitemap_id = ?", (sitemap_id,))
-                logging.info(f"Removed sitemap entry for deleted template: {file_name}")
-
-        # Add new templates that don't have entries yet
-        for filename in html_files:
-            if filename in existing_files:
-                continue
-
-            filepath = os.path.join(templates_dir, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    raw_html = f.read()
-
-                # Strip HTML tags, extract text content
-                text = re.sub(r'<script[^>]*>.*?</script>', '', raw_html, flags=re.DOTALL)
-                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
-                text = re.sub(r'<[^>]+>', ' ', text)
-                text = re.sub(r'\s+', ' ', text).strip()
-
-                if text:
-                    combined = f"{filename}:{text}"
-                    sitemap_id = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-                    await db.execute(
-                        "INSERT INTO sitemap (sitemap_id, file_name, file_content) VALUES (?, ?, ?)",
-                        (sitemap_id, filename, text)
-                    )
-                    logging.info(f"Indexed template: {filename}")
-            except Exception as e:
-                logging.warning(f"Failed to index template {filename}: {e}")
-
-        await db.commit()
-
-    logging.info("Template indexing complete")
 
 async def setup_infrastructure():
     """Initialize infrastructure for agent"""
@@ -929,12 +593,9 @@ async def handle_get_status(cell, transmitter: dict):
 async def handle_get_index(cell, transmitter: dict):
     """Handle getting the index/welcome page for operators"""
     data = transmitter.get("data", {})
-    operator = transmitter.get("operator", {})
     logging.info("Fetching index page")
 
-    index_message = await get_setting("index")
-    if not index_message:
-        index_message = "Welcome to Neuronum Webserver!"
+    index_message = f"Welcome to kybercell - Your Private AI Workspace!"
 
     # Load and render template
     template = env.get_template("index.html")
@@ -944,69 +605,6 @@ async def handle_get_index(cell, transmitter: dict):
         cell,
         transmitter.get("transmitter_id"),
         {"json": index_message, "html": html_content},
-        data.get("public_key", "")
-    )
-
-async def handle_update_index(cell, transmitter: dict):
-    """Handle updating the index/welcome message"""
-    data = transmitter.get("data", {})
-    index_message = data.get("index", "")
-
-    logging.info("Updating index message...")
-    await set_setting("index", index_message)
-
-    await send_cell_response(
-        cell,
-        transmitter.get("transmitter_id"),
-        {"json": "index updated"},
-        data.get("public_key", "")
-    )
-
-async def handle_update_sitemap(cell, transmitter: dict):
-    """Handle updating existing sitemap entry in database"""
-    data = transmitter.get("data", {})
-    sitemap_id = data.get("sitemap_id", None)
-    file_content = data.get("file_content", None)
-    cell_id = transmitter.get("operator", "default_user")
-
-    logging.info("Updating sitemap entry in database...")
-    await update_sitemap_entry(sitemap_id, file_content)
-
-    await send_cell_response(
-        cell,
-        transmitter.get("transmitter_id"),
-        {"json": "sitemap updated"},
-        data.get("public_key", "")
-    )
-
-async def handle_delete_sitemap(cell, transmitter: dict):
-    """Handle deleting sitemap entry from database"""
-    data = transmitter.get("data", {})
-    sitemap_id = data.get("sitemap_id", None)
-    cell_id = transmitter.get("operator", "default_user")
-
-    logging.info("Deleting sitemap entry from database...")
-    await delete_sitemap_entry(sitemap_id)
-
-    await send_cell_response(
-        cell,
-        transmitter.get("transmitter_id"),
-        {"json": "sitemap entry deleted"},
-        data.get("public_key", "")
-    )
-
-async def handle_get_sitemap(cell, transmitter: dict):
-    """Handle fetching all sitemap entries from database"""
-    data = transmitter.get("data", {})
-    logging.info("Fetching all sitemap entries...")
-
-    sitemap_list = await fetch_all_sitemap()
-    logging.info(sitemap_list)
-
-    await send_cell_response(
-        cell,
-        transmitter.get("transmitter_id"),
-        {"json": sitemap_list},
         data.get("public_key", "")
     )
 
@@ -1060,8 +658,19 @@ async def handle_approve(cell, transmitter: dict):
         return
 
     tool_name = pending_action.get("tool_name")
-    parameters = json.loads(pending_action.get("parameter", "{}"))
-    original_data = json.loads(pending_action.get("original_data", "{}"))
+    try:
+        parameters = json.loads(pending_action.get("parameter") or "{}")
+        original_data = json.loads(pending_action.get("original_data") or "{}")
+    except (json.JSONDecodeError, TypeError) as e:
+        logging.error(f"[Approve] Malformed action data for {action_id}: {e}")
+        await update_action_status(action_id, "failed", f"Malformed action data: {e}")
+        await send_cell_response(
+            cell,
+            transmitter.get("transmitter_id"),
+            {"json": f"Error: Action {action_id} has corrupted data and was marked as failed."},
+            data.get("public_key", "")
+        )
+        return
     operator = original_data.get("operator", f"operator_{operator}")
     is_multi_step = pending_action.get("is_multi_step", False)
 
@@ -1284,13 +893,11 @@ async def handle_decline(cell, transmitter: dict):
 
 
 async def handle_prompt(cell, transmitter: dict):
-    """Handle user prompt as an agentic file server with tool capability
+    """Handle user prompt with tool routing
 
     This endpoint:
-    - Retrieves relevant templates based on user query (sitemap)
-    - Uses LLM to generate a natural response based on template content
+    - Routes user messages to the appropriate tool via LLM
     - Can use operator-accessible tools in a conversational flow
-    - Can escalate requests to the queue for employee handling
     - Returns both the JSON response and the matching HTML template
     """
     data = transmitter.get("data", {})
@@ -1344,11 +951,12 @@ Parameters:
 
         tools_context = "\n\n".join(tool_info_list) if tool_info_list else "No tools available."
 
-        # Fetch actions history for this operator
+        # Fetch recent actions history for this operator (limit to last 10 to keep prompt concise)
         all_actions = await fetch_all_actions(operator=operator)
+        recent_actions = all_actions[-10:] if len(all_actions) > 10 else all_actions
         actions_context = ""
-        for action in all_actions:
-            actions_context += f"\n- [{action['status'].upper()}] {action['tool_name']}: {action['description']} (parameters: {action['parameter']})"
+        for action in recent_actions:
+            actions_context += f"\n- [{action['status'].upper()}] {action['tool_name']}: {action['description']}"
 
         # Build system prompt — tool router (no indexed content, no answer action)
         system_prompt = textwrap.dedent(f"""
@@ -1362,7 +970,7 @@ Parameters:
 
             RULES:
             - You MUST ALWAYS select a tool. There is no "answer" action — every request goes through a tool
-            - For general questions, information lookups, or anything not handled by a specific tool → use "search_content"
+            - If no tool matches the user's request → use action "clarify" and explain that this request cannot be handled
             - If a tool matches the request and ALL required parameters are present → use action "tool"
             - If a tool matches but required parameters are missing from the user's message → use action "clarify" and list exactly which parameters are needed
             - If the request needs exactly ONE tool call → use action "tool" with parameters filled in and NO "steps" key
@@ -1438,8 +1046,8 @@ Parameters:
         try:
             decision = json.loads(result_json)
         except json.JSONDecodeError:
-            # Fallback: if JSON parsing fails, route to search_content
-            decision = {"action": "tool", "tool_name": "search_content", "parameters": {"query": prompt}, "message": f"I'd like to search for information about: {prompt}. Please confirm."}
+            # Fallback: if JSON parsing fails, ask for clarification
+            decision = {"action": "clarify", "message": "I'm sorry, I couldn't understand your request. Could you please rephrase it?"}
 
         action = decision.get("action", "tool")
         operator_message = decision.get("message", "I'm here to help. Could you please rephrase your question?")
@@ -1454,14 +1062,13 @@ Parameters:
             action = "tool"
             decision["action"] = "tool"
 
-        # Fallback: if model still chose "answer", route to search_content
+        # Fallback: if model still chose "answer", treat as clarify
         if action == "answer":
-            logging.info("[Agent Decision Normalized]: action 'answer' normalized to search_content tool")
-            action = "tool"
-            decision["action"] = "tool"
-            decision["tool_name"] = "search_content"
-            decision["parameters"] = {"query": prompt}
-            operator_message = decision.get("message", f"I'd like to search for information about: {prompt}. Please confirm.")
+            logging.info("[Agent Decision Normalized]: action 'answer' normalized to clarify")
+            action = "clarify"
+            decision["action"] = "clarify"
+            if not decision.get("message"):
+                operator_message = "I'm sorry, I couldn't find a matching tool for your request. Could you please rephrase it?"
 
         logging.info(f"[Agent Decision]: action={action}")
 
@@ -1503,8 +1110,36 @@ Parameters:
                 operator_message = f"I'd like to use {tool_name}: {subject}" + (f" ({param_details})" if param_details else "") + ". Please approve to proceed."
                 logging.info(f"[Normalized]: unwrapped single-entry steps into single-step for {tool_name}")
 
-            # Normalize: if top-level parameters are empty but no steps, check if model
-            # forgot to fill parameters (already handled by the model, just log)
+            # Generate a proper confirmation message for single-step tool actions
+            # if the model didn't provide one (avoids the generic "rephrase" fallback)
+            if not steps and tool_name and operator_message == "I'm here to help. Could you please rephrase your question?":
+                param_details = ", ".join(f"{k}: {v}" for k, v in parameters.items()) if parameters else ""
+                operator_message = f"I'd like to use {tool_name}" + (f" ({param_details})" if param_details else "") + ". Please approve to proceed."
+
+            # Normalize parameter names: map LLM mistakes to correct schema names
+            def normalize_params(params, t_name):
+                tool_schema = next((t.get("inputSchema", {}) for t in operator_tools if t["name"] == t_name), {})
+                valid_names = set(tool_schema.get("properties", {}).keys())
+                if not valid_names or all(k in valid_names for k in params):
+                    return params
+                normalized = {}
+                for key, value in params.items():
+                    if key in valid_names:
+                        normalized[key] = value
+                    else:
+                        # Try to find matching schema param by substring
+                        match = next((v for v in valid_names if v in key or key in v), None)
+                        if match and match not in normalized:
+                            logging.info(f"[Param Normalized]: '{key}' -> '{match}' for {t_name}")
+                            normalized[match] = value
+                        else:
+                            normalized[key] = value
+                return normalized
+
+            parameters = normalize_params(parameters, tool_name)
+            for step in steps:
+                step["parameters"] = normalize_params(step.get("parameters", {}), step.get("tool_name", ""))
+
             is_multi_step = len(steps) >= 2
 
             logging.info(f"[Tool Action]: {tool_name} (multi_step={is_multi_step}, steps={len(steps)})")
@@ -1645,13 +1280,29 @@ Parameters:
                     step_word = "step" if len(steps) == 1 else "steps"
                     operator_message = f"I'd like to perform the following {len(steps)} {step_word}:\n" + "\n".join(step_descriptions) + "\n\nPlease approve to proceed."
 
+                # Try to render a preview page for the pending action
+                preview_html = html_content
+                tool_info = tool_meta_map.get(tool_name, {})
+                package_name = tool_info.get("package_name", "").lower()
+                if package_name and not is_multi_step:
+                    # Try common template naming patterns
+                    for template_name in [f"{package_name}.html", f"{package_name}s.html", f"{tool_name}.html"]:
+                        try:
+                            preview_template = env.get_template(template_name)
+                            preview_data = {**parameters, "preview": True, "message": operator_message}
+                            preview_html = preview_template.render(**preview_data)
+                            logging.info(f"[Preview Page]: {template_name}")
+                            break
+                        except Exception:
+                            continue
+
                 await store_message(operator, "user", prompt)
                 await store_message(operator, "assistant", operator_message)
 
                 await send_cell_response(
                     cell,
                     transmitter.get("transmitter_id"),
-                    {"json": operator_message, "html": html_content, "action_id": action_id},
+                    {"json": operator_message, "html": preview_html, "action_id": action_id},
                     data.get("public_key", "")
                 )
 
@@ -1692,8 +1343,6 @@ async def handle_get_tools(cell, transmitter: dict):
             for filename in os.listdir(tools_dir):
                 if filename.endswith(".config"):
                     tool_id = filename[:-7]
-                    if tool_id == "search_content":
-                        continue
                     config_path = os.path.join(tools_dir, filename)
 
                     try:
@@ -1962,12 +1611,8 @@ async def route_message(cell, transmitter: dict):
             return
 
         handlers = {
-            "update_index": lambda: handle_update_index(cell, transmitter),
             "get_index": lambda: handle_get_index(cell, transmitter),
             "get_agent_status": lambda: handle_get_status(cell, transmitter),
-            "update_sitemap": lambda: handle_update_sitemap(cell, transmitter),
-            "delete_sitemap": lambda: handle_delete_sitemap(cell, transmitter),
-            "get_sitemap": lambda: handle_get_sitemap(cell, transmitter),
             "get_actions": lambda: handle_get_actions(cell, transmitter),
             "prompt": lambda: handle_prompt(cell, transmitter),
             "approve": lambda: handle_approve(cell, transmitter),
@@ -1987,10 +1632,19 @@ async def route_message(cell, transmitter: dict):
         import traceback
         logging.error(traceback.format_exc())
 
+def _task_done_callback(task: asyncio.Task):
+    """Log unhandled exceptions from fire-and-forget tasks"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logging.error(f"Unhandled exception in message task: {exc}", exc_info=exc)
+
 async def process_cell_messages(cell):
-    """Main message processing loop for cell"""
+    """Main message processing loop for cell — dispatches messages concurrently"""
     async for transmitter in cell.sync():
-        asyncio.create_task(route_message(cell, transmitter))
+        task = asyncio.create_task(route_message(cell, transmitter))
+        task.add_done_callback(_task_done_callback)
 
 # Main Function
 
@@ -2003,9 +1657,6 @@ async def server_main():
 
         logging.info("Initializing database...")
         await initialize_database()
-
-        logging.info("Indexing templates...")
-        await index_templates()
 
         await install_tool_requirements()
 

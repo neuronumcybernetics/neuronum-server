@@ -115,7 +115,6 @@ PUBLIC_KEY = _cell_creds['public_key']
 # Server configuration
 LOG_FILE = _config.get("LOG_FILE", "server.log")
 DB_PATH = _config.get("DB_PATH", "agent_memory.db")
-TASKS_DIR = _config.get("TASKS_DIR", "./tasks")
 
 MODEL_MAX_TOKENS = _config.get("MODEL_MAX_TOKENS", 512)
 MODEL_TEMPERATURE = _config.get("MODEL_TEMPERATURE", 0.3)
@@ -130,6 +129,4 @@ OLLAMA_MODEL_NAME = _config.get("OLLAMA_MODEL_NAME", "llama3.2:3b")
 OLLAMA_API_BASE = _config.get("OLLAMA_API_BASE", "http://127.0.0.1:11434/v1")
 
 CONVERSATION_HISTORY_LIMIT = _config.get("CONVERSATION_HISTORY_LIMIT", 5)
-KNOWLEDGE_RETRIEVAL_LIMIT = _config.get("KNOWLEDGE_RETRIEVAL_LIMIT", 2)
-FTS5_STOPWORDS = _config.get("FTS5_STOPWORDS", {"or","and","not","near"})
 TEMPLATES_DIR = _config.get("TEMPLATES_DIR", "./templates")
