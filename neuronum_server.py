@@ -1577,13 +1577,7 @@ def is_authorized_internal_cell(operator: str, server_host: str) -> bool:
 
 
 # Handlers that community/operators are allowed to access
-CUSTOMER_ALLOWED_HANDLERS = {
-    "prompt",
-    "approve",
-    "decline",
-    "get_agent_status",
-    "get_index"
-}
+CUSTOMER_ALLOWED_HANDLERS = {}
 
 
 async def route_message(cell, transmitter: dict):
@@ -1643,6 +1637,7 @@ def _task_done_callback(task: asyncio.Task):
 async def process_cell_messages(cell):
     """Main message processing loop for cell — dispatches messages concurrently"""
     async for transmitter in cell.sync():
+
         task = asyncio.create_task(route_message(cell, transmitter))
         task.add_done_callback(_task_done_callback)
 
