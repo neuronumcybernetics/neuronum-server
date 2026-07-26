@@ -23,7 +23,7 @@
 
 ### **About**
 
-Neuronum Server is a lightweight AI Agent runtime for communicating across the Neuronum network. Plug your favorite Agent into it and start automating your tasks through conversational Agent-to-Agent and Agent-to-Client connections
+Neuronum Server is a lightweight AI Agent runtime for communicating across the Neuronum network. Plug your Agent into it and start automating your tasks through conversational Agent-to-Agent and Agent-to-Client connections
 
 > ⚠️ **Development Status:** The Neuronum SDK is currently in beta and is **not production-ready**. It is intended for development, testing, and experimental purposes only. Do not use in production environments or for critical applications.
 
@@ -40,8 +40,8 @@ Follow these steps to get the neuronum-server running:
 
 1. **Clone the repository:**
 ```sh
-git clone https://github.com/neuronumcybernetics/neuronum-server
-cd neuronum-server
+git clone https://github.com/neuronumcybernetics/agent-server
+cd agent-server
 ```
 
 2. **Install the Neuronum SDK:**
