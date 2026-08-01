@@ -14,7 +14,7 @@
     <img src="https://img.shields.io/pypi/v/neuronum.svg" alt="PyPI Version">
   </a><br>
   <img src="https://img.shields.io/badge/Python-3.8%2B-yellow" alt="Python Version">
-  <a href="https://github.com/neuronumcybernetics/cell-sdk-python/blob/main/LICENSE.md">
+  <a href="https://github.com/neuronumcybernetics/neuronum-sdk-python/blob/main/LICENSE.md">
     <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License">
   </a>
 </p>
@@ -49,14 +49,14 @@ cd agent-server
 pip install neuronum
 ```
 
-3. **Set up your Cell (your digital identity on the Neuronum network):**
-   - If you don't have a Cell yet:
+3. **Set up your Agent (your digital identity on the Neuronum network):**
+   - If you don't have an Agent yet:
    ```sh
-   neuronum create-cell
+   neuronum create-agent
    ```
-   - If you already have a Cell and want to connect it to this device:
+   - If you already have an Agent and want to connect it to this device:
    ```sh
-   neuronum connect-cell
+   neuronum connect-agent
    ```
 
 4. **Install the server dependencies:**

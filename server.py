@@ -1,6 +1,6 @@
 import asyncio
 import json
-from neuronum import Cell
+from neuronum import Agent
 from model import call_model
 from elements import validate_element_payload
 
@@ -62,18 +62,18 @@ File — prompt the user to upload a file:
 """
 
 
-async def get_session_context(cell: Cell, session_id: str) -> str:
+async def get_session_context(agent: Agent, session_id: str) -> str:
     """Returns full system prompt built from session metadata. Caches per session."""
     if session_id not in instruction_cache:
-        metadata = await cell.fetch_session_metadata(session_id)
+        metadata = await agent.fetch_session_metadata(session_id)
         metadata_cache[session_id] = metadata or {}
         instruct = metadata.get("instruct", "") if metadata else ""
         instruction_cache[session_id] = SYSTEM_PROMPT.replace("## Instruction\n", f"## Instruction\n\n{instruct}\n")
     return instruction_cache[session_id]
 
 
-async def build_history(cell: Cell, session_id: str) -> list[dict]:
-    messages = await cell.get_session_messages(session_id)
+async def build_history(agent: Agent, session_id: str) -> list[dict]:
+    messages = await agent.get_session_messages(session_id)
     history = []
     for m in messages:
         data = m["data"]
@@ -92,7 +92,7 @@ async def build_history(cell: Cell, session_id: str) -> list[dict]:
             text = str(text)
         if not text:
             continue
-        role = "assistant" if m["sender"] == cell.host else "user"
+        role = "assistant" if m["sender"] == agent.host else "user"
         history.append({"role": role, "content": text})
     return history
 
@@ -105,15 +105,15 @@ def generate_reply(system: str, history: list[dict]) -> dict:
         return {"msg": reply.get("msg", str(reply))}
 
 
-async def listen(cell: Cell):
-    async for message in cell.sync_messages():
+async def listen(agent: Agent):
+    async for message in agent.sync_messages():
         session_id = message["session_id"]
         sender = message["sender"]
         data = message["data"]
         action = data.get("action")
         user_text = data.get("msg", "")
 
-        if sender == cell.host:
+        if sender == agent.host:
             continue
 
         # ── Session joined — start conversation immediately ───────────────────
@@ -121,21 +121,21 @@ async def listen(cell: Cell):
             if session_id in session_started:
                 continue
             try:
-                existing = await cell.get_session_messages(session_id)
-                if any(m["sender"] == cell.host for m in existing):
+                existing = await agent.get_session_messages(session_id)
+                if any(m["sender"] == agent.host for m in existing):
                     session_started.add(session_id)
                     continue
             except Exception:
                 pass
             session_started.add(session_id)
             try:
-                system = await get_session_context(cell, session_id)
+                system = await get_session_context(agent, session_id)
                 greeting = await asyncio.to_thread(
                     generate_reply,
                     system,
                     [{"role": "user", "content": "Introduce yourself briefly and let me know how you can help."}],
                 )
-                await cell.send_session_message(session_id, greeting)
+                await agent.send_session_message(session_id, greeting)
             except Exception as e:
                 print(f"[worker] Error sending greeting in {session_id}: {e}")
             continue
@@ -143,10 +143,10 @@ async def listen(cell: Cell):
         # ── Element response ──────────────────────────────────────────────────
         if action == "element_response":
             try:
-                system = await get_session_context(cell, session_id)
-                history = await build_history(cell, session_id)
+                system = await get_session_context(agent, session_id)
+                history = await build_history(agent, session_id)
                 reply = await asyncio.to_thread(generate_reply, system, history)
-                await cell.send_session_message(session_id, reply)
+                await agent.send_session_message(session_id, reply)
             except Exception as e:
                 print(f"[worker] Error on element_response in {session_id}: {e}")
             continue
@@ -160,10 +160,10 @@ async def listen(cell: Cell):
             continue
 
         try:
-            system = await get_session_context(cell, session_id)
-            history = await build_history(cell, session_id)
+            system = await get_session_context(agent, session_id)
+            history = await build_history(agent, session_id)
             reply = await asyncio.to_thread(generate_reply, system, history)
-            await cell.send_session_message(session_id, reply)
+            await agent.send_session_message(session_id, reply)
         except Exception as e:
             print(f"[worker] Error handling message in {session_id}: {e}")
 
@@ -171,10 +171,10 @@ async def listen(cell: Cell):
 async def main():
     retry_delay = 2
 
-    async with Cell() as cell:
+    async with Agent() as agent:
         while True:
             try:
-                await listen(cell)
+                await listen(agent)
             except Exception as e:
                 print(f"[worker] SSE error: {e}")
             await asyncio.sleep(retry_delay)
