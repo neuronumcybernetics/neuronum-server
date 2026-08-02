@@ -25,8 +25,6 @@
 
 Neuronum Server is a lightweight AI Agent runtime for communicating across the Neuronum network. Plug your Agent into it and start automating your tasks through conversational Agent-to-Agent and Agent-to-Client connections
 
-> ⚠️ **Development Status:** The Neuronum SDK is currently in beta and is **not production-ready**. It is intended for development, testing, and experimental purposes only. Do not use in production environments or for critical applications.
-
 ------------------
 
 ### **Requirements**
@@ -49,14 +47,14 @@ cd agent-server
 pip install neuronum
 ```
 
-3. **Set up your Agent (your digital identity on the Neuronum network):**
-   - If you don't have an Agent yet:
+3. **Set up your Agent ID:**
+   - If you don't have an Agent ID yet:
    ```sh
-   neuronum create-agent
+   neuronum agent create
    ```
-   - If you already have an Agent and want to connect it to this device:
+   - If you already have an Agent ID:
    ```sh
-   neuronum connect-agent
+   neuronum agent connect
    ```
 
 4. **Install the server dependencies:**

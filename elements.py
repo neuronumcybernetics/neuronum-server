@@ -27,8 +27,8 @@ def validate_element_payload(data: dict) -> dict:
             raise ValueError("element='table' requires a non-empty 'columns' list")
         if data.get("rows") is None or not isinstance(data["rows"], list):
             raise ValueError("element='table' requires a 'rows' list")
-        # Coerce all agent values to strings
-        data["rows"] = [[str(agent) for agent in row] for row in data["rows"]]
+        # Coerce all values to strings
+        data["rows"] = [[str(value) for value in row] for row in data["rows"]]
 
     elif element == "card":
         if not data.get("components") or not isinstance(data["components"], list):

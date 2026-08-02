@@ -1,6 +1,6 @@
 import asyncio
 import json
-from neuronum import Agent
+from neuronum import AgentIdentity
 from model import call_model
 from elements import validate_element_payload
 
@@ -62,18 +62,18 @@ File — prompt the user to upload a file:
 """
 
 
-async def get_session_context(agent: Agent, session_id: str) -> str:
+async def get_session_context(identity: AgentIdentity, session_id: str) -> str:
     """Returns full system prompt built from session metadata. Caches per session."""
     if session_id not in instruction_cache:
-        metadata = await agent.fetch_session_metadata(session_id)
+        metadata = await identity.fetch_session_metadata(session_id)
         metadata_cache[session_id] = metadata or {}
         instruct = metadata.get("instruct", "") if metadata else ""
         instruction_cache[session_id] = SYSTEM_PROMPT.replace("## Instruction\n", f"## Instruction\n\n{instruct}\n")
     return instruction_cache[session_id]
 
 
-async def build_history(agent: Agent, session_id: str) -> list[dict]:
-    messages = await agent.get_session_messages(session_id)
+async def build_history(identity: AgentIdentity, session_id: str) -> list[dict]:
+    messages = await identity.get_session_messages(session_id)
     history = []
     for m in messages:
         data = m["data"]
@@ -92,7 +92,7 @@ async def build_history(agent: Agent, session_id: str) -> list[dict]:
             text = str(text)
         if not text:
             continue
-        role = "assistant" if m["sender"] == agent.host else "user"
+        role = "assistant" if m["sender"] == identity.host else "user"
         history.append({"role": role, "content": text})
     return history
 
@@ -105,15 +105,15 @@ def generate_reply(system: str, history: list[dict]) -> dict:
         return {"msg": reply.get("msg", str(reply))}
 
 
-async def listen(agent: Agent):
-    async for message in agent.sync_messages():
+async def listen(identity: AgentIdentity):
+    async for message in identity.sync_messages():
         session_id = message["session_id"]
         sender = message["sender"]
         data = message["data"]
         action = data.get("action")
         user_text = data.get("msg", "")
 
-        if sender == agent.host:
+        if sender == identity.host:
             continue
 
         # ── Session joined — start conversation immediately ───────────────────
@@ -121,21 +121,21 @@ async def listen(agent: Agent):
             if session_id in session_started:
                 continue
             try:
-                existing = await agent.get_session_messages(session_id)
-                if any(m["sender"] == agent.host for m in existing):
+                existing = await identity.get_session_messages(session_id)
+                if any(m["sender"] == identity.host for m in existing):
                     session_started.add(session_id)
                     continue
             except Exception:
                 pass
             session_started.add(session_id)
             try:
-                system = await get_session_context(agent, session_id)
+                system = await get_session_context(identity, session_id)
                 greeting = await asyncio.to_thread(
                     generate_reply,
                     system,
                     [{"role": "user", "content": "Introduce yourself briefly and let me know how you can help."}],
                 )
-                await agent.send_session_message(session_id, greeting)
+                await identity.send_session_message(session_id, greeting)
             except Exception as e:
                 print(f"[worker] Error sending greeting in {session_id}: {e}")
             continue
@@ -143,10 +143,10 @@ async def listen(agent: Agent):
         # ── Element response ──────────────────────────────────────────────────
         if action == "element_response":
             try:
-                system = await get_session_context(agent, session_id)
-                history = await build_history(agent, session_id)
+                system = await get_session_context(identity, session_id)
+                history = await build_history(identity, session_id)
                 reply = await asyncio.to_thread(generate_reply, system, history)
-                await agent.send_session_message(session_id, reply)
+                await identity.send_session_message(session_id, reply)
             except Exception as e:
                 print(f"[worker] Error on element_response in {session_id}: {e}")
             continue
@@ -160,10 +160,10 @@ async def listen(agent: Agent):
             continue
 
         try:
-            system = await get_session_context(agent, session_id)
-            history = await build_history(agent, session_id)
+            system = await get_session_context(identity, session_id)
+            history = await build_history(identity, session_id)
             reply = await asyncio.to_thread(generate_reply, system, history)
-            await agent.send_session_message(session_id, reply)
+            await identity.send_session_message(session_id, reply)
         except Exception as e:
             print(f"[worker] Error handling message in {session_id}: {e}")
 
@@ -171,10 +171,10 @@ async def listen(agent: Agent):
 async def main():
     retry_delay = 2
 
-    async with Agent() as agent:
+    async with AgentIdentity() as identity:
         while True:
             try:
-                await listen(agent)
+                await listen(identity)
             except Exception as e:
                 print(f"[worker] SSE error: {e}")
             await asyncio.sleep(retry_delay)
