@@ -76,4 +76,4 @@ python server.py
 -----------------
 
 ### **Full Documentation**
-Visit the [Neuronum Docs](https://neuronum.net/docs) for the complete SDK reference.
+Visit [Neuronum Documentation](https://neuronum.net/docs) for the complete SDK reference.
